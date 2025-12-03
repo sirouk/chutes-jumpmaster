@@ -360,9 +360,10 @@ register_passthrough_routes(chute, load_route_manifest(), SERVICE_PORTS[0])
 
 ### Route Discovery Fails
 
-1. **Container exits immediately**: Check `CHUTE_ENV` for required environment variables
+1. **Container exits immediately**: Check `CHUTE_ENV` for required environment variables. The discovery tool shows last 50 lines of logs on crash.
 2. **No routes found**: The service may not expose OpenAPI; use `CHUTE_STATIC_ROUTES`
-3. **Timeout**: Increase `--startup-delay` and `--probe-timeout`
+3. **Timeout**: Increase startup delay (default 120s) and probe timeout (default 180s) in interactive prompts
+4. **GPU issues**: Ensure Docker has GPU access (`--docker-gpus all`)
 
 ### Build Fails with InvalidPath
 
@@ -371,11 +372,21 @@ The Chutes SDK has path restrictions:
 - No file extensions (`.txt`, `.js`, etc.)
 - No root path (`/`)
 
-These are automatically filtered, but if you see this error, check your `CHUTE_STATIC_ROUTES`.
+These are automatically filtered by `register_passthrough_routes()`, but if you see this error, check your `CHUTE_STATIC_ROUTES`.
 
 ### Remote Build Requires Balance
 
 Remote builds require >= $50 USD account balance. Use `--local` for local builds.
+
+### Chute Not Ready After Deploy
+
+The deploy scripts poll for readiness by checking `/openapi.json`. If your service doesn't expose this:
+- Add a custom `/health` endpoint
+- Check logs: `docker logs -f chute-<module>` or view the log file path shown
+
+### Account Not Found
+
+Run `chutes register` to create `~/.chutes/config.ini`. The deploy script checks for this config and shows your username/payment address via menu option 9.
 
 ## How It Works
 
