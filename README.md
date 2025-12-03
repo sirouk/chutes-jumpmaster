@@ -119,6 +119,14 @@ For services without OpenAPI, define `CHUTE_STATIC_ROUTES` in your module instea
 ./deploy.sh --deploy deploy_myservice           # Deploy to Chutes
 ```
 
+Or build directly with the chutes CLI (requires GPU hardware matching your image):
+
+```bash
+source .venv/bin/activate
+chutes build deploy_myservice:chute --wait --local
+chutes deploy deploy_myservice:chute
+```
+
 ## File Structure
 
 ```
