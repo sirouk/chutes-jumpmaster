@@ -1,0 +1,10 @@
+# Chutes SDK
+chutes>=0.1.0
+
+# HTTP client for route discovery
+requests>=2.28.0
+httpx>=0.24.0
+
+# Logging
+loguru>=0.7.0
+
