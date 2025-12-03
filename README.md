@@ -2,7 +2,7 @@
 
 A toolkit for wrapping Docker images and deploying them on [Chutes.ai](https://chutes.ai).
 
-For full Chutes SDK documentation, see the [Image API Reference](https://chutes.ai/docs/sdk-reference/image).
+For full Chutes SDK documentation, see the [Image API Reference](https://chutes.ai/docs/sdk-reference/image) and [Deploying a Chute](https://github.com/chutesai/chutes?tab=readme-ov-file#-deploying-a-chute).
 
 ## Overview
 
