@@ -1,0 +1,9 @@
+# Chutes configuration
+# Copy to ~/.chutes/config.ini after running: chutes register
+
+[auth]
+username = your_chutes_username
+api_key = your_api_key
+
+[payment]
+address = your_tao_payment_address
