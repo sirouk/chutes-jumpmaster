@@ -31,6 +31,7 @@ STATUS_CHUTE=""
 RUN_MODULE=""
 RUN_DOCKER_MODULE=""
 DELETE_CHUTE=""
+LOGS_CHUTE=""
 DISCOVER_MODULE=""
 LOCAL_BUILD=false
 ACCEPT_FEE=false
@@ -135,6 +136,7 @@ ${YELLOW}Options:${NC}
   
   ${BLUE}Management:${NC}
   --delete NAME           Delete a chute (interactive confirmation)
+  --logs NAME             Check instance logs for a chute
   --debug                 Enable debug output
 
 ${YELLOW}Available Modules:${NC}
@@ -374,6 +376,17 @@ do_build() {
     fi
     
     print_success "Build complete"
+    
+    # For local builds, test chutes-inspecto.so compatibility
+    if $LOCAL_BUILD; then
+        local image=$(get_image_name "$module")
+        if [[ -n "$image" ]] && docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${image}$"; then
+            echo ""
+            if ! test_inspecto_hash "$image"; then
+                print_error "Image may fail remote build due to Python/inspecto incompatibility"
+            fi
+        fi
+    fi
 }
 
 show_running_chute_containers() {
@@ -547,6 +560,34 @@ if name_match and tag_match:
 " 2>/dev/null)
     
     echo "$result"
+}
+
+test_inspecto_hash() {
+    local image="$1"
+    
+    print_info "Testing chutes-inspecto.so compatibility..."
+    print_cmd "docker run --rm --entrypoint \"\" $image bash -c 'pip install chutes --upgrade >/dev/null 2>&1 && chutes run does_not_exist:chute --generate-inspecto-hash; echo EXIT:\$?'"
+    echo ""
+    
+    local output
+    output=$(docker run --rm --entrypoint "" "$image" bash -c 'pip install chutes --upgrade >/dev/null 2>&1 && chutes run does_not_exist:chute --generate-inspecto-hash; echo EXIT:$?' 2>&1)
+    local exit_line
+    exit_line=$(echo "$output" | grep -oE 'EXIT:[0-9]+' | tail -1)
+    local exit_code="${exit_line#EXIT:}"
+    
+    echo "$output"
+    echo ""
+    
+    if [[ "$exit_code" == "0" ]]; then
+        print_success "chutes-inspecto.so test passed (exit 0)"
+        return 0
+    elif [[ "$exit_code" == "139" ]]; then
+        print_error "chutes-inspecto.so SEGFAULT (exit 139) - Conda Python issue"
+        return 1
+    else
+        print_warning "chutes-inspecto.so test exited with code $exit_code"
+        return 1
+    fi
 }
 
 wait_for_chute_ready() {
@@ -881,6 +922,29 @@ do_delete() {
     print_success "Chute deleted"
 }
 
+do_check_logs() {
+    local chute_name="$1"
+    
+    print_header "Instance Logs: $chute_name"
+    
+    ensure_venv
+    
+    # Try to find matching deploy module for warmup
+    local warmup_arg=""
+    for f in "$SCRIPT_DIR"/deploy_*.py; do
+        if [[ -f "$f" ]]; then
+            local module=$(basename "$f" .py)
+            # Check if this module's CHUTE_NAME matches
+            if grep -q "CHUTE_NAME.*=.*['\"]${chute_name}['\"]" "$f" 2>/dev/null; then
+                warmup_arg="--warmup ${module}:chute"
+                break
+            fi
+        fi
+    done
+    
+    python3 "$SCRIPT_DIR/tools/instance_logs.py" "$chute_name" $warmup_arg
+}
+
 show_account_info() {
     print_header "Account Info"
     
@@ -917,7 +981,8 @@ show_menu() {
     echo -e "  ${GREEN}6)${NC} Deploy chute"
     echo -e "  ${GREEN}7)${NC} Chute status"
     echo -e "  ${GREEN}8)${NC} Delete chute"
-    echo -e "  ${GREEN}9)${NC} Account info"
+    echo -e "  ${GREEN}9)${NC} Instance logs"
+    echo -e "  ${GREEN}0)${NC} Account info"
     echo -e "  ${GREEN}q)${NC} Quit"
     echo ""
 }
@@ -976,6 +1041,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --delete)
             DELETE_CHUTE="$2"
+            shift 2
+            ;;
+        --logs)
+            LOGS_CHUTE="$2"
             shift 2
             ;;
         --local)
@@ -1070,6 +1139,11 @@ main() {
         exit 0
     fi
     
+    if [[ -n "$LOGS_CHUTE" ]]; then
+        do_check_logs "$LOGS_CHUTE"
+        exit 0
+    fi
+    
     # Interactive mode
     while true; do
         show_menu
@@ -1142,6 +1216,15 @@ main() {
                 fi
                 ;;
             9)
+                module=$(select_module "Select module for logs") || continue
+                # Extract CHUTE_NAME from the module file
+                chute_name=$(grep -oP "CHUTE_NAME\s*=\s*['\"]\\K[^'\"]*" "$SCRIPT_DIR/${module}.py" 2>/dev/null)
+                if [[ -z "$chute_name" ]]; then
+                    chute_name="${module#deploy_}"  # fallback: strip deploy_ prefix
+                fi
+                do_check_logs "$chute_name"
+                ;;
+            0)
                 show_account_info
                 ;;
             q|Q)
