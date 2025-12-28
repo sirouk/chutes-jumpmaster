@@ -98,8 +98,8 @@ ensure_venv() {
 ensure_chutes_config() {
     if [[ ! -f "$CHUTES_CONFIG" ]]; then
         print_error "Chutes config not found at $CHUTES_CONFIG"
-        print_info "Run setup.sh to register with Chutes first."
-        exit 1
+        print_info "Run setup.sh to register, or use Account → Link Bittensor Wallet in deploy.sh."
+        return 1
     fi
 }
 
@@ -116,7 +116,7 @@ chutes_api_list_tsv() {
     local include_public="${2:-false}"
 
     ensure_venv
-    ensure_chutes_config
+    ensure_chutes_config || return 1
 
     python - "$object_type" "$include_public" <<'PYCODE'
 import asyncio
@@ -825,8 +825,8 @@ get_api_key() {
 }
 
 get_api_base_url() {
-    local base_url
-    base_url=$(grep -E "^base_url" "$HOME/.chutes/config.ini" 2>/dev/null | head -n1 | cut -d'=' -f2 | tr -d '[:space:]')
+    local base_url=""
+    base_url=$(grep -E "^base_url" "$HOME/.chutes/config.ini" 2>/dev/null | head -n1 | cut -d'=' -f2 | tr -d '[:space:]' || true)
     if [[ -z "$base_url" ]]; then
         base_url="https://api.chutes.ai"
     fi
@@ -1040,7 +1040,7 @@ do_deploy() {
     
     # Show payment info
     echo -e "${BLUE}Payment Address:${NC}"
-    grep "address" "$CHUTES_CONFIG" 2>/dev/null || print_warning "Payment address not found"
+    grep -E "^address\\s*=" "$CHUTES_CONFIG" 2>/dev/null || print_warning "Payment address not found"
     echo ""
     
     print_warning "Deployment requires TAO balance and may incur fees"
@@ -1559,11 +1559,307 @@ do_keep_warm() {
     done
 }
 
+do_link_bittensor_wallet() {
+    print_header "Link Bittensor Wallet (existing Chutes account)"
+
+    local api_key=""
+    if api_key=$(get_api_key); then
+        : # ok
+    else
+        read -rp "Chutes API key (cpk_...): " api_key
+        api_key=$(echo "$api_key" | tr -d '[:space:]')
+        if [[ -z "$api_key" ]]; then
+            print_error "API key is required (set CHUTES_API_KEY or write ~/.chutes/api_key)"
+            return 1
+        fi
+        if confirm "Save API key to ~/.chutes/api_key for later (logs, etc.)?" "y"; then
+            mkdir -p "$HOME/.chutes"
+            printf "%s\n" "$api_key" > "$HOME/.chutes/api_key"
+            chmod 600 "$HOME/.chutes/api_key" 2>/dev/null || true
+            print_success "Saved ~/.chutes/api_key"
+        fi
+    fi
+    local base_url
+    base_url=$(get_api_base_url)
+
+    print_info "This will update /users/change_bt_auth and write: $CHUTES_CONFIG"
+    print_info "Auth: uses CHUTES_API_KEY or ~/.chutes/api_key"
+    echo ""
+
+    if ! confirm "Continue?" "y"; then
+        print_warning "Cancelled"
+        return 0
+    fi
+
+    local wallet_dir="$HOME/.bittensor/wallets"
+    if [[ ! -d "$wallet_dir" ]]; then
+        print_error "No bittensor wallets found at $wallet_dir"
+        print_info "Create one with btcli wallet new_coldkey/new_hotkey, then re-run."
+        return 1
+    fi
+
+    local default_wallet=""
+    local wallet_count=0
+    for d in "$wallet_dir"/*/; do
+        [[ -d "$d" ]] || continue
+        wallet_count=$((wallet_count + 1))
+        [[ -z "$default_wallet" ]] && default_wallet="$(basename "$d")"
+    done
+    if [[ $wallet_count -eq 0 ]]; then
+        print_error "No wallets found in $wallet_dir"
+        return 1
+    fi
+
+    local wallet_name=""
+    read -rp "Wallet name (coldkey) [${default_wallet}]: " wallet_name
+    wallet_name="${wallet_name:-$default_wallet}"
+    if [[ ! -d "$wallet_dir/$wallet_name" ]]; then
+        print_error "Wallet not found: $wallet_dir/$wallet_name"
+        return 1
+    fi
+
+    local hotkey_dir="$wallet_dir/$wallet_name/hotkeys"
+    if [[ ! -d "$hotkey_dir" ]]; then
+        print_error "Hotkey directory not found: $hotkey_dir"
+        return 1
+    fi
+
+    local default_hotkey=""
+    local hotkey_count=0
+    for f in "$hotkey_dir"/*; do
+        [[ -f "$f" ]] || continue
+        hotkey_count=$((hotkey_count + 1))
+        [[ -z "$default_hotkey" ]] && default_hotkey="$(basename "$f")"
+    done
+    if [[ $hotkey_count -eq 0 ]]; then
+        print_error "No hotkeys found in $hotkey_dir"
+        return 1
+    fi
+
+    local hotkey_name=""
+    read -rp "Hotkey name [${default_hotkey}]: " hotkey_name
+    hotkey_name="${hotkey_name:-$default_hotkey}"
+
+    local coldkey_pub_file="$wallet_dir/$wallet_name/coldkeypub.txt"
+    local hotkey_file="$hotkey_dir/$hotkey_name"
+    if [[ ! -f "$coldkey_pub_file" ]]; then
+        print_error "Coldkey pub file not found: $coldkey_pub_file"
+        return 1
+    fi
+    if [[ ! -f "$hotkey_file" ]]; then
+        print_error "Hotkey file not found: $hotkey_file"
+        return 1
+    fi
+
+    local coldkey_ss58
+    coldkey_ss58=$(head -n1 "$coldkey_pub_file" 2>/dev/null | tr -d '[:space:]')
+    if [[ -z "$coldkey_ss58" ]]; then
+        print_error "Failed to read coldkey ss58 from $coldkey_pub_file"
+        return 1
+    fi
+
+    local parsed
+    parsed=$(python3 - "$hotkey_file" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+def pick(d, keys):
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+ss58 = pick(data, ["ss58Address", "ss58_address", "ss58"])
+seed = pick(data, ["secretSeed", "secret_seed", "seed"])
+if seed.startswith("0x"):
+    seed = seed[2:]
+
+if not ss58 or not seed:
+    raise SystemExit("missing ss58Address or secretSeed")
+
+print(f"{ss58}\t{seed}")
+PY
+) || {
+        print_error "Failed to parse hotkey JSON (need ss58Address + secretSeed): $hotkey_file"
+        return 1
+    }
+
+    local hotkey_ss58address=""
+    local hotkey_seed=""
+    IFS=$'\t' read -r hotkey_ss58address hotkey_seed <<<"$parsed"
+    if [[ -z "$hotkey_ss58address" || -z "$hotkey_seed" ]]; then
+        print_error "Failed to extract hotkey ss58/seed from $hotkey_file"
+        return 1
+    fi
+
+    print_info "Fetching /users/me..."
+    local auth_header_primary="$api_key"
+    local auth_header_secondary="Bearer ${api_key}"
+
+    local user_tmp
+    user_tmp=$(mktemp)
+    local code
+    code=$(curl -sS -o "$user_tmp" -w "%{http_code}" -H "Authorization: ${auth_header_primary}" "${base_url}/users/me" || true)
+    if [[ "$code" != "200" ]]; then
+        code=$(curl -sS -o "$user_tmp" -w "%{http_code}" -H "Authorization: ${auth_header_secondary}" "${base_url}/users/me" || true)
+        if [[ "$code" == "200" ]]; then
+            local tmp="$auth_header_primary"
+            auth_header_primary="$auth_header_secondary"
+            auth_header_secondary="$tmp"
+        fi
+    fi
+    local username=""
+    local user_id=""
+    local payment_address=""
+    local developer_payment_address=""
+
+    if [[ "$code" == "200" ]]; then
+        local fields
+        fields=$(python3 - "$user_tmp" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+def find_first(obj, keys):
+    if isinstance(obj, dict):
+        for k in keys:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for v in obj.values():
+            r = find_first(v, keys)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = find_first(v, keys)
+            if r:
+                return r
+    return ""
+
+username = find_first(data, ["username", "user_name", "name"])
+user_id = find_first(data, ["user_id", "id", "uid"])
+pay = find_first(data, ["payment_address", "paymentAddress", "address"])
+devpay = find_first(data, ["developer_payment_address", "developerPaymentAddress", "developer_address", "developerAddress"])
+
+print("\t".join([username, user_id, pay, devpay]))
+PY
+) || true
+        IFS=$'\t' read -r username user_id payment_address developer_payment_address <<<"$fields"
+    else
+        print_warning "Failed to fetch /users/me (HTTP $code). Will still try /users/change_bt_auth."
+        head -c 300 "$user_tmp" 2>/dev/null || true
+        echo ""
+    fi
+    rm -f "$user_tmp"
+
+    echo ""
+    [[ -n "$username" && -n "$user_id" ]] && print_info "Account: ${username} (${user_id})"
+    print_info "Coldkey: ${coldkey_ss58}"
+    print_info "Hotkey:  ${hotkey_ss58address}"
+    echo ""
+
+    if ! confirm "Update /users/change_bt_auth now?" "y"; then
+        print_warning "Cancelled"
+        return 0
+    fi
+
+    local payload
+    payload=$(printf '{"coldkey":"%s","hotkey":"%s"}' "$coldkey_ss58" "$hotkey_ss58address")
+
+    local resp_tmp
+    resp_tmp=$(mktemp)
+    code=$(curl -sS -o "$resp_tmp" -w "%{http_code}" -X POST "${base_url}/users/change_bt_auth" \
+        -H "Authorization: ${auth_header_primary}" \
+        -H "Content-Type: application/json" \
+        -d "$payload" || true)
+    if [[ ! "$code" =~ ^2 ]]; then
+        code=$(curl -sS -o "$resp_tmp" -w "%{http_code}" -X POST "${base_url}/users/change_bt_auth" \
+            -H "Authorization: ${auth_header_secondary}" \
+            -H "Content-Type: application/json" \
+            -d "$payload" || true)
+    fi
+    if [[ ! "$code" =~ ^2 ]]; then
+        print_error "Failed to update /users/change_bt_auth (HTTP $code)"
+        head -c 300 "$resp_tmp" 2>/dev/null || true
+        echo ""
+        rm -f "$resp_tmp"
+        return 1
+    fi
+
+    # If /users/me didn't yield identity, parse it from the change_bt_auth response.
+    if [[ -z "$username" || -z "$user_id" ]]; then
+        mapfile -t parsed_ident < <(python3 - "$resp_tmp" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    d = json.load(f)
+def pick(*keys):
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+print(pick("username"))
+print(pick("user_id", "id", "uid"))
+PY
+) || true
+        username="${parsed_ident[0]:-}"
+        user_id="${parsed_ident[1]:-}"
+    fi
+
+    if [[ -z "$username" || -z "$user_id" ]]; then
+        print_error "Could not determine username/user_id for config. Re-run, or fill config.ini manually."
+        rm -f "$resp_tmp"
+        return 1
+    fi
+
+    if [[ -z "$payment_address" ]]; then
+        print_warning "No payment address detected from API (config will contain an empty payment address)"
+    fi
+
+    rm -f "$resp_tmp"
+
+    mkdir -p "$(dirname "$CHUTES_CONFIG")"
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+
+    local cfg_tmp
+    cfg_tmp=$(mktemp)
+    cat > "$cfg_tmp" <<EOF
+[api]
+base_url = ${base_url}
+
+[auth]
+username = ${username}
+user_id = ${user_id}
+hotkey_seed = ${hotkey_seed}
+hotkey_name = ${hotkey_name}
+hotkey_ss58address = ${hotkey_ss58address}
+
+[payment]
+address = ${payment_address}
+developer_payment_address = ${developer_payment_address}
+EOF
+    mv "$cfg_tmp" "$CHUTES_CONFIG"
+    chmod 600 "$CHUTES_CONFIG" 2>/dev/null || true
+    umask "$old_umask" 2>/dev/null || true
+
+    print_success "Linked wallet + wrote config: $CHUTES_CONFIG"
+}
+
 show_account_info() {
     print_header "Account Info"
     
     if [[ ! -f "$CHUTES_CONFIG" ]]; then
-        print_warning "Not configured. Run setup.sh first."
+        print_warning "Not configured. Run setup.sh, or use Account → Link Bittensor Wallet."
         return 1
     fi
     
@@ -1641,25 +1937,26 @@ show_menu() {
     echo ""
     echo -e "  ${CYAN}── ACCOUNT ───────────────────────────────────────────────────────${NC}"
     echo -e "  ${GREEN} 1)${NC} Show Account Info (wallet + balance)"
+    echo -e "  ${GREEN} 2)${NC} Link Bittensor Wallet (existing Chutes account)"
     echo ""
     echo -e "  ${CYAN}── BUILDING ──────────────────────────────────────────────────────${NC}"
-    echo -e "  ${GREEN} 2)${NC} Build Chute (from local deploy_*.py)"
-    echo -e "  ${GREEN} 3)${NC} Discover & Define (create from existing Docker image)"
+    echo -e "  ${GREEN} 3)${NC} Build Chute (from local deploy_*.py)"
+    echo -e "  ${GREEN} 4)${NC} Discover & Define (create from existing Docker image)"
     echo ""
     echo -e "  ${CYAN}── LOCAL TESTING ─────────────────────────────────────────────────${NC}"
-    echo -e "  ${GREEN} 4)${NC} Run in Docker (GPU sanity test)"
-    echo -e "  ${GREEN} 5)${NC} Run in Dev Mode (host process)"
+    echo -e "  ${GREEN} 5)${NC} Run in Docker (GPU sanity test)"
+    echo -e "  ${GREEN} 6)${NC} Run in Dev Mode (host process)"
     echo ""
     echo -e "  ${CYAN}── CLOUD OPERATIONS ──────────────────────────────────────────────${NC}"
-    echo -e "  ${GREEN} 6)${NC} Deploy to Chutes.ai"
-    echo -e "  ${GREEN} 7)${NC} Check Chute Status (health + instances)"
-    echo -e "  ${GREEN} 8)${NC} Tail Instance Logs"
-    echo -e "  ${GREEN} 9)${NC} Warmup Chute (trigger manual spin-up)"
-    echo -e "  ${GREEN}10)${NC} Keep Chute Warm (continuous ping loop)"
+    echo -e "  ${GREEN} 7)${NC} Deploy to Chutes.ai"
+    echo -e "  ${GREEN} 8)${NC} Check Chute Status (health + instances)"
+    echo -e "  ${GREEN} 9)${NC} Tail Instance Logs"
+    echo -e "  ${GREEN}10)${NC} Warmup Chute (trigger manual spin-up)"
+    echo -e "  ${GREEN}11)${NC} Keep Chute Warm (continuous ping loop)"
     echo ""
     echo -e "  ${CYAN}── MANAGEMENT ────────────────────────────────────────────────────${NC}"
-    echo -e "  ${GREEN}11)${NC} List & Delete Chutes"
-    echo -e "  ${GREEN}12)${NC} List & Delete Images"
+    echo -e "  ${GREEN}12)${NC} List & Delete Chutes"
+    echo -e "  ${GREEN}13)${NC} List & Delete Images"
     echo ""
     echo -e "  ${GREEN} q)${NC} Quit"
     echo ""
@@ -1762,32 +2059,35 @@ done
 # =============================================================================
 
 main() {
-    # Check prerequisites
-    ensure_venv
-    ensure_chutes_config
-    
     # Handle flags
     if $SHOW_HELP; then
         show_usage
         exit 0
     fi
+
+    # Check prerequisites
+    ensure_venv
     
     if $LIST_IMAGES; then
+        ensure_chutes_config
         do_list_images
         exit 0
     fi
     
     if $LIST_CHUTES; then
+        ensure_chutes_config
         do_list_chutes
         exit 0
     fi
     
     if [[ -n "$STATUS_CHUTE" ]]; then
+        ensure_chutes_config
         do_chute_status "$STATUS_CHUTE"
         exit 0
     fi
     
     if [[ -n "$BUILD_MODULE" ]]; then
+        ensure_chutes_config
         do_build "$BUILD_MODULE"
         exit 0
     fi
@@ -1798,26 +2098,31 @@ main() {
     fi
     
     if [[ -n "$RUN_DOCKER_MODULE" ]]; then
+        ensure_chutes_config
         do_run_docker "$RUN_DOCKER_MODULE"
         exit 0
     fi
     
     if [[ -n "$RUN_MODULE" ]]; then
+        ensure_chutes_config
         do_run "$RUN_MODULE"
         exit 0
     fi
     
     if [[ -n "$DEPLOY_MODULE" ]]; then
+        ensure_chutes_config
         do_deploy "$DEPLOY_MODULE"
         exit 0
     fi
     
     if [[ -n "$DELETE_CHUTE" ]]; then
+        ensure_chutes_config
         do_delete "$DELETE_CHUTE"
         exit 0
     fi
     
     if [[ -n "$LOGS_CHUTE" ]]; then
+        ensure_chutes_config
         do_check_logs "$LOGS_CHUTE"
         exit 0
     fi
@@ -1832,6 +2137,10 @@ main() {
                 show_account_info
                 ;;
             2)
+                do_link_bittensor_wallet
+                ;;
+            3)
+                ensure_chutes_config || continue
                 module=$(select_module "Select module to build") || continue
                 if ! prompt_route_discovery_before_build "$module"; then
                     continue
@@ -1854,11 +2163,13 @@ main() {
                     *) print_error "Invalid option" ;;
                 esac
                 ;;
-            3)
+            4)
+                ensure_chutes_config || continue
                 do_create_from_image
                 ;;
-            4)
+            5)
                 # Run in Docker (for wrapped services like XTTS)
+                ensure_chutes_config || continue
                 show_running_chute_containers
                 module=$(select_module "Select module to run in Docker") || continue
                 read -rp "Port [8000]: " port_input
@@ -1866,8 +2177,9 @@ main() {
                 do_run_docker "$module"
                 PORT=8000
                 ;;
-            5)
+            6)
                 # Run dev mode (for Python chutes, runs on host)
+                ensure_chutes_config || continue
                 show_running_chute_processes
                 module=$(select_module "Select module for dev mode") || continue
                 DEV_MODE=true
@@ -1877,33 +2189,40 @@ main() {
                 DEV_MODE=false
                 PORT=8000
                 ;;
-            6)
+            7)
+                ensure_chutes_config || continue
                 module=$(select_module "Select module to deploy") || continue
                 do_deploy "$module"
                 ;;
-            7)
+            8)
+                ensure_chutes_config || continue
                 chute_name=$(select_chute_for_status) || continue
                 do_chute_status "$chute_name"
                 ;;
-            8)
+            9)
+                ensure_chutes_config || continue
                 chute_name=$(select_chute_for_status) || continue
                 do_check_logs "$chute_name"
                 ;;
-            9)
+            10)
+                ensure_chutes_config || continue
                 chute_name=$(select_chute_for_warmup) || continue
                 do_warmup "$chute_name"
                 ;;
-            10)
+            11)
+                ensure_chutes_config || continue
                 chute_name=$(select_chute_for_warmup) || continue
                 do_keep_warm "$chute_name"
                 ;;
-            11)
+            12)
+                ensure_chutes_config || continue
                 chute_name=$(select_chute_to_delete) || continue
                 if [[ -n "$chute_name" ]]; then
                     do_delete "$chute_name"
                 fi
                 ;;
-            12)
+            13)
+                ensure_chutes_config || continue
                 image_name=$(select_image_to_delete) || continue
                 if [[ -n "$image_name" ]]; then
                     do_delete_image "$image_name"
