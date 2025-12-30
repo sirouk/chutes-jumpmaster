@@ -440,26 +440,66 @@ module_to_chute_name() {
 
 select_chute_for_status() {
     # Send all UI to stderr so command substitution only captures the name
-    print_header "Select Chute for Status" >&2
-
-    local module
-    module=$(select_module "Select module for chute status") || return 1
-
-    local chute_name
-    chute_name=$(module_to_chute_name "$module")
-
-    if [[ -z "$chute_name" ]]; then
-        print_warning "Could not infer chute name from $module" >&2
-        read -rp "Enter chute name manually: " manual_name >&2
-        if [[ -z "$manual_name" ]]; then
-            print_error "Chute name is required" >&2
-            return 1
-        fi
-        chute_name="$manual_name"
+    local chute_input=""
+    echo "" >&2
+    read -rp "Chute Name or ID (press Enter to list): " chute_input
+    if [[ -n "$chute_input" ]]; then
+        echo "$chute_input"
+        return 0
     fi
 
-    echo "$chute_name"
-    return 0
+    print_header "Select Deployed Chute" >&2
+
+    local lines_raw=""
+    local lines=()
+    local chute_ids=()
+    local chute_names=()
+    local choice=""
+
+    if ! lines_raw="$(chutes_api_list_tsv "chutes")"; then
+        print_error "Failed to list chutes (API call). Check network/auth." >&2
+        return 1
+    fi
+
+    if [[ -n "$lines_raw" ]]; then
+        mapfile -t lines <<<"$lines_raw"
+    fi
+
+    for line in ${lines[@]+"${lines[@]}"}; do
+        IFS=$'\t' read -r cid cname cstatus cslug <<<"$line"
+        [[ -n "$cid" && -n "$cname" ]] || continue
+        chute_ids+=("$cid")
+        chute_names+=("$cname")
+    done
+
+    if [[ ${#chute_ids[@]} -eq 0 ]]; then
+        print_warning "No deployed chutes found" >&2
+        return 1
+    fi
+
+    echo -e "${BLUE}Deployed Chutes:${NC}" >&2
+    local i=1
+    while [[ $i -le ${#chute_ids[@]} ]]; do
+        local idx=$((i-1))
+        echo -e "  ${GREEN}$i)${NC} ${chute_names[$idx]} (id: ${chute_ids[$idx]})" >&2
+        i=$((i + 1))
+    done
+    echo -e "  ${YELLOW}b)${NC} Back" >&2
+    echo "" >&2
+
+    read -rp "Select chute (1-${#chute_ids[@]}): " choice
+    if [[ "$choice" == "b" || "$choice" == "B" ]]; then
+        return 1
+    fi
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#chute_ids[@]} ]]; then
+        local idx=$((choice - 1))
+        echo "${chute_ids[$idx]}"
+        return 0
+    fi
+
+    print_error "Invalid selection" >&2
+    return 1
 }
 
 do_build() {
@@ -1116,6 +1156,17 @@ list_deployed_chutes() {
 }
 
 select_chute_to_delete() {
+    # Send all UI to stderr so command substitution only captures the name
+    local chute_input=""
+    echo "" >&2
+    read -rp "Chute Name or ID to delete (press Enter to list): " chute_input
+    if [[ -n "$chute_input" ]]; then
+        echo "$chute_input"
+        return 0
+    fi
+
+    print_header "Select Chute to Delete" >&2
+
     local lines_raw=""
     local lines=()
     local chute_ids=()
@@ -1133,7 +1184,7 @@ select_chute_to_delete() {
         mapfile -t lines <<<"$lines_raw"
     fi
 
-    for line in "${lines[@]}"; do
+    for line in ${lines[@]+"${lines[@]}"}; do
         IFS=$'\t' read -r cid cname cstatus cslug <<<"$line"
         [[ -n "$cid" && -n "$cname" ]] || continue
         chute_ids+=("$cid")
@@ -1142,33 +1193,24 @@ select_chute_to_delete() {
         chute_slugs+=("$cslug")
     done
 
-    {
-        print_header "Select Chute to Delete"
-
-        if [[ ${#chute_ids[@]} -eq 0 ]]; then
-            print_warning "No deployed chutes found"
-            echo ""
-        else
-            echo -e "${BLUE}Deployed Chutes:${NC}"
-            local i=1
-            while [[ $i -le ${#chute_ids[@]} ]]; do
-                local idx=$((i-1))
-                echo -e "  ${GREEN}$i)${NC} ${chute_names[$idx]} (${chute_statuses[$idx]})"
-                [[ -n "${chute_slugs[$idx]}" ]] && echo -e "      slug: ${chute_slugs[$idx]}"
-                echo -e "      id:   ${chute_ids[$idx]}"
-                i=$((i + 1))
-            done
-            echo -e "  ${YELLOW}b)${NC} Back"
-            echo ""
-
-            read -rp "Select chute to delete (1-${#chute_ids[@]}): " choice
-        fi
-    } >&2
-
     if [[ ${#chute_ids[@]} -eq 0 ]]; then
+        print_warning "No deployed chutes found" >&2
         return 1
     fi
 
+    echo -e "${BLUE}Deployed Chutes:${NC}" >&2
+    local i=1
+    while [[ $i -le ${#chute_ids[@]} ]]; do
+        local idx=$((i-1))
+        echo -e "  ${GREEN}$i)${NC} ${chute_names[$idx]} (${chute_statuses[$idx]})" >&2
+        [[ -n "${chute_slugs[$idx]}" ]] && echo -e "      slug: ${chute_slugs[$idx]}" >&2
+        echo -e "      id:   ${chute_ids[$idx]}" >&2
+        i=$((i + 1))
+    done
+    echo -e "  ${YELLOW}b)${NC} Back" >&2
+    echo "" >&2
+
+    read -rp "Select chute to delete (1-${#chute_ids[@]}): " choice
     if [[ "$choice" == "b" || "$choice" == "B" ]]; then
         return 1
     fi
@@ -1250,6 +1292,17 @@ list_built_images() {
 }
 
 select_image_to_delete() {
+    # Send all UI to stderr so command substitution only captures the name
+    local image_input=""
+    echo "" >&2
+    read -rp "Image Name or ID to delete (press Enter to list): " image_input
+    if [[ -n "$image_input" ]]; then
+        echo "$image_input"
+        return 0
+    fi
+
+    print_header "Select Image to Delete" >&2
+
     local lines_raw=""
     local lines=()
     local image_ids=()
@@ -1267,7 +1320,7 @@ select_image_to_delete() {
         mapfile -t lines <<<"$lines_raw"
     fi
 
-    for line in "${lines[@]}"; do
+    for line in ${lines[@]+"${lines[@]}"}; do
         IFS=$'\t' read -r iid iname itag istatus <<<"$line"
         [[ -n "$iid" && -n "$iname" ]] || continue
         image_ids+=("$iid")
@@ -1276,32 +1329,23 @@ select_image_to_delete() {
         image_statuses+=("${istatus:-unknown}")
     done
 
-    {
-        print_header "Select Image to Delete"
-
-        if [[ ${#image_ids[@]} -eq 0 ]]; then
-            print_warning "No built images found"
-            echo ""
-        else
-            echo -e "${BLUE}Built Images:${NC}"
-            local i=1
-            while [[ $i -le ${#image_ids[@]} ]]; do
-                local idx=$((i-1))
-                echo -e "  ${GREEN}$i)${NC} ${image_names[$idx]}:${image_tags[$idx]} (${image_statuses[$idx]})"
-                echo -e "      id: ${image_ids[$idx]}"
-                i=$((i + 1))
-            done
-            echo -e "  ${YELLOW}b)${NC} Back"
-            echo ""
-
-            read -rp "Select image to delete (1-${#image_ids[@]}): " choice
-        fi
-    } >&2
-
     if [[ ${#image_ids[@]} -eq 0 ]]; then
+        print_warning "No built images found" >&2
         return 1
     fi
 
+    echo -e "${BLUE}Built Images:${NC}" >&2
+    local i=1
+    while [[ $i -le ${#image_ids[@]} ]]; do
+        local idx=$((i-1))
+        echo -e "  ${GREEN}$i)${NC} ${image_names[$idx]}:${image_tags[$idx]} (${image_statuses[$idx]})" >&2
+        echo -e "      id: ${image_ids[$idx]}" >&2
+        i=$((i + 1))
+    done
+    echo -e "  ${YELLOW}b)${NC} Back" >&2
+    echo "" >&2
+
+    read -rp "Select image to delete (1-${#image_ids[@]}): " choice
     if [[ "$choice" == "b" || "$choice" == "B" ]]; then
         return 1
     fi
@@ -1444,6 +1488,17 @@ PYCODE
 }
 
 select_chute_for_warmup() {
+    # Send all UI to stderr so command substitution only captures the name
+    local chute_input=""
+    echo "" >&2
+    read -rp "Chute Name or ID to warmup (press Enter to list): " chute_input
+    if [[ -n "$chute_input" ]]; then
+        echo "$chute_input"
+        return 0
+    fi
+
+    print_header "Select Chute to Warmup" >&2
+
     local lines_raw=""
     local lines=()
     local chute_ids=()
@@ -1461,7 +1516,7 @@ select_chute_for_warmup() {
         mapfile -t lines <<<"$lines_raw"
     fi
 
-    for line in "${lines[@]}"; do
+    for line in ${lines[@]+"${lines[@]}"}; do
         IFS=$'\t' read -r cid cname cstatus cslug <<<"$line"
         [[ -n "$cid" && -n "$cname" ]] || continue
         chute_ids+=("$cid")
@@ -1470,33 +1525,24 @@ select_chute_for_warmup() {
         chute_slugs+=("$cslug")
     done
 
-    {
-        print_header "Select Chute to Warmup"
-
-        if [[ ${#chute_ids[@]} -eq 0 ]]; then
-            print_warning "No deployed chutes found"
-            echo ""
-        else
-            echo -e "${BLUE}Deployed Chutes:${NC}"
-            local i=1
-            while [[ $i -le ${#chute_ids[@]} ]]; do
-                local idx=$((i-1))
-                echo -e "  ${GREEN}$i)${NC} ${chute_names[$idx]} (${chute_statuses[$idx]})"
-                [[ -n "${chute_slugs[$idx]}" ]] && echo -e "      slug: ${chute_slugs[$idx]}"
-                echo -e "      id:   ${chute_ids[$idx]}"
-                i=$((i + 1))
-            done
-            echo -e "  ${YELLOW}b)${NC} Back"
-            echo ""
-
-            read -rp "Select chute to warm up (1-${#chute_ids[@]}): " choice
-        fi
-    } >&2
-
     if [[ ${#chute_ids[@]} -eq 0 ]]; then
+        print_warning "No deployed chutes found" >&2
         return 1
     fi
 
+    echo -e "${BLUE}Deployed Chutes:${NC}" >&2
+    local i=1
+    while [[ $i -le ${#chute_ids[@]} ]]; do
+        local idx=$((i-1))
+        echo -e "  ${GREEN}$i)${NC} ${chute_names[$idx]} (${chute_statuses[$idx]})" >&2
+        [[ -n "${chute_slugs[$idx]}" ]] && echo -e "      slug: ${chute_slugs[$idx]}" >&2
+        echo -e "      id:   ${chute_ids[$idx]}" >&2
+        i=$((i + 1))
+    done
+    echo -e "  ${YELLOW}b)${NC} Back" >&2
+    echo "" >&2
+
+    read -rp "Select chute to warm up (1-${#chute_ids[@]}): " choice
     if [[ "$choice" == "b" || "$choice" == "B" ]]; then
         return 1
     fi
