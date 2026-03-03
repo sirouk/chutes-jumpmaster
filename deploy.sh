@@ -224,7 +224,7 @@ ${YELLOW}Options:${NC}
   
   ${BLUE}Management:${NC}
   --delete NAME           Delete a chute (interactive confirmation)
-  --logs NAME             Check instance logs for a chute
+  --logs NAME             Warmup + stream logs (auto-watch, legacy fallback)
   --debug                 Enable debug output
 
 ${YELLOW}Available Modules:${NC}
@@ -1397,12 +1397,16 @@ do_delete_image() {
     fi
 }
 
-do_check_logs() {
+chutes_supports_stream_logs() {
+    local help_text
+    help_text=$(chutes warmup --help 2>&1 || true)
+    [[ "$help_text" == *"--stream-logs"* ]]
+}
+
+do_check_logs_legacy_poll() {
     local chute_name="$1"
     
-    print_header "Instance Logs: $chute_name"
-    
-    ensure_venv
+    print_header "Instance Logs (legacy polling): $chute_name"
 
     local api_key
     api_key=$(get_api_key) || return 1
@@ -1456,7 +1460,6 @@ PYCODE
         mapfile -t ids_array <<< "$instance_ids"
         print_info "Found ${#ids_array[@]} instance(s). Iterating to find available logs..."
 
-        local found_logs=false
         for instance_id in "${ids_array[@]}"; do
             [[ -z "$instance_id" ]] && continue
             
@@ -1485,6 +1488,41 @@ PYCODE
         print_warning "All instances checked, none providing logs. Restarting search in 3s..."
         sleep 3
     done
+}
+
+do_check_logs() {
+    local chute_name="$1"
+
+    print_header "Warmup + Stream Logs: $chute_name"
+    ensure_venv
+
+    if chutes_supports_stream_logs; then
+        local -a cmd=(chutes warmup "$chute_name" --stream-logs)
+        if $DEBUG_MODE; then
+            cmd+=(--debug)
+        fi
+
+        print_info "Using SDK watcher mode (auto warmup + instance watch)."
+        print_cmd "${cmd[*]}"
+
+        set +e
+        "${cmd[@]}"
+        local warmup_status=$?
+        set -e
+
+        if [[ $warmup_status -eq 0 ]]; then
+            return 0
+        fi
+        if [[ $warmup_status -eq 130 ]]; then
+            return 130
+        fi
+
+        print_warning "SDK watcher failed (exit $warmup_status). Falling back to legacy polling mode."
+    else
+        print_warning "Installed chutes CLI does not support --stream-logs; using legacy polling mode."
+    fi
+
+    do_check_logs_legacy_poll "$chute_name"
 }
 
 select_chute_for_warmup() {
@@ -1996,7 +2034,7 @@ show_menu() {
     echo -e "  ${CYAN}── CLOUD OPERATIONS ──────────────────────────────────────────────${NC}"
     echo -e "  ${GREEN} 7)${NC} Deploy to Chutes.ai"
     echo -e "  ${GREEN} 8)${NC} Check Chute Status (health + instances)"
-    echo -e "  ${GREEN} 9)${NC} Tail Instance Logs"
+    echo -e "  ${GREEN} 9)${NC} Warmup + Stream Logs (auto-watch)"
     echo -e "  ${GREEN}10)${NC} Warmup Chute (trigger manual spin-up)"
     echo -e "  ${GREEN}11)${NC} Keep Chute Warm (continuous ping loop)"
     echo ""

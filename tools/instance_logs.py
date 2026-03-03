@@ -1,35 +1,72 @@
 #!/usr/bin/env python3
 """
-Fetch logs from chute instances.
+Watcher-first log helper for chutes.
+
+Preferred path:
+  chutes warmup <chute> --stream-logs
+
+Compatibility path:
+  Legacy API-key polling is used when the installed chutes CLI does not
+  support --stream-logs or when watcher execution fails.
 """
 import os
-import sys
+import re
 import subprocess
-import httpx
+import time
 from configparser import ConfigParser
 
-# Load API key from environment or prompt
+import httpx
+
+
+def chutes_supports_stream_logs() -> bool:
+    """Return True if the installed chutes CLI exposes --stream-logs on warmup."""
+    try:
+        result = subprocess.run(
+            ["chutes", "warmup", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        help_text = f"{result.stdout}\n{result.stderr}"
+        return "--stream-logs" in help_text
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def run_watcher_logs(chute_ref: str) -> int:
+    """Run SDK watcher mode and return process exit code."""
+    cmd = ["chutes", "warmup", chute_ref, "--stream-logs"]
+    print(f"Using SDK watcher mode: {' '.join(cmd)}")
+    try:
+        return subprocess.run(cmd).returncode
+    except FileNotFoundError:
+        print("chutes CLI not found in PATH.")
+        return 127
+    except OSError as exc:
+        print(f"Unable to start watcher mode: {exc}")
+        return 1
+
+
 def get_api_key() -> str:
     """Get API key from environment, file, or prompt."""
     api_key = os.getenv("CHUTES_API_KEY")
     if api_key:
         return api_key
-    # Try loading from a local file
+
     key_file = os.path.expanduser("~/.chutes/api_key")
     if os.path.exists(key_file):
-        with open(key_file) as f:
-            return f.read().strip()
-    # Prompt user
-    print("API key required for instance logs.")
+        with open(key_file, encoding="utf-8") as file_obj:
+            return file_obj.read().strip()
+
+    print("API key required for legacy log polling fallback.")
     print("Get one from: chutes keys list / chutes keys create <name>")
     api_key = input("Enter API key (cpk_...): ").strip()
     if api_key:
-        # Optionally save for next time
         save = input("Save to ~/.chutes/api_key? [y/N]: ").strip().lower()
         if save == "y":
             os.makedirs(os.path.dirname(key_file), exist_ok=True)
-            with open(key_file, "w") as f:
-                f.write(api_key)
+            with open(key_file, "w", encoding="utf-8") as file_obj:
+                file_obj.write(api_key)
             print(f"Saved to {key_file}")
         return api_key
     raise RuntimeError("No API key provided")
@@ -43,66 +80,36 @@ def get_base_url() -> str:
 
 
 def warmup_chute(module_path: str, timeout_seconds: int = 10) -> bool:
-    """Run warmup with timeout, return True if it started warming."""
-    import time
-    import select
+    """Legacy warmup helper used only in fallback mode."""
     try:
-        # Start warmup in background - it will keep running until instance is ready
         proc = subprocess.Popen(
             ["chutes", "warmup", module_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        
-        output_lines = []
-        start = time.time()
-        
-        while time.time() - start < timeout_seconds:
-            # Check if process finished
-            ret = proc.poll()
-            if ret is not None:
-                remaining = proc.stdout.read()
-                if remaining:
-                    output_lines.append(remaining)
-                break
-            
-            # Try to read available output without blocking
-            import os
-            import fcntl
-            fd = proc.stdout.fileno()
-            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-            try:
-                chunk = proc.stdout.read()
-                if chunk:
-                    output_lines.append(chunk)
-            except (IOError, TypeError):
-                pass
-            
-            elapsed = int(time.time() - start)
-            print(f"\r  Waiting for instance... {elapsed}s/{timeout_seconds}s", end="", flush=True)
-            time.sleep(1)
-        
-        print()  # newline after progress
-        
-        # Check output for errors (CLI returns 0 even on error)
-        output = "".join(output_lines)
-        if "not found" in output.lower() or "does not belong" in output.lower():
-            print("  Chute not deployed - deploy first with option 6")
-            return False
-        elif "error" in output.lower() and "status: warm" not in output.lower():
-            print(f"  Warmup issue: check deployment")
-            return False
-        elif proc.poll() is None:
-            proc.terminate()
-            print("  Still warming up...")
-            return True
-        else:
-            return True
-    except Exception as e:
-        print(f"Warmup error: {e}")
+    except OSError as exc:
+        print(f"Warmup error: {exc}")
         return False
+
+    try:
+        proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        print("Warmup started; instance may still be spinning up.")
+        return True
+
+    output = ""
+    if proc.stdout:
+        output = proc.stdout.read()
+    lowered = output.lower()
+    if "not found" in lowered or "does not belong" in lowered:
+        print("Chute not deployed - deploy first.")
+        return False
+    if "error" in lowered and "status: warm" not in lowered:
+        print("Warmup issue detected in CLI output.")
+        return False
+    return True
 
 
 def get_chute_instances(base_url: str, api_key: str, chute_id: str) -> list[dict]:
@@ -117,9 +124,7 @@ def get_chute_instances(base_url: str, api_key: str, chute_id: str) -> list[dict
 
 
 def get_chute_id_by_name(chute_name: str) -> str | None:
-    """Get chute ID by name using CLI (which has proper hotkey auth)."""
-    import json
-    import re
+    """Get chute ID by name using CLI output."""
     try:
         result = subprocess.run(
             ["chutes", "chutes", "get", chute_name],
@@ -129,14 +134,14 @@ def get_chute_id_by_name(chute_name: str) -> str | None:
         )
         if result.returncode != 0:
             return None
-        # Find JSON in output (starts with { and ends with })
-        output = result.stdout
-        json_match = re.search(r'\{[\s\S]*\}', output)
+        json_match = re.search(r"\{[\s\S]*\}", result.stdout)
         if json_match:
+            import json
+
             data = json.loads(json_match.group())
             return data.get("chute_id")
-    except Exception as e:
-        print(f"CLI lookup error: {e}")
+    except Exception as exc:
+        print(f"CLI lookup error: {exc}")
     return None
 
 
@@ -157,8 +162,8 @@ def fetch_instance_logs(
             timeout=timeout,
         )
         return resp.status_code, resp.text
-    except Exception as e:
-        return -1, str(e)
+    except Exception as exc:
+        return -1, str(exc)
 
 
 def stream_instance_logs(
@@ -184,8 +189,8 @@ def stream_instance_logs(
                 print(chunk, end="", flush=True)
     except KeyboardInterrupt:
         print("\n[Interrupted]")
-    except Exception as e:
-        print(f"Stream error: {e}")
+    except Exception as exc:
+        print(f"Stream error: {exc}")
 
 
 def find_instance_with_logs(
@@ -197,17 +202,17 @@ def find_instance_with_logs(
     """
     Try instances until one returns logs.
     Returns (instance_id, logs) or (None, error_msg).
-    Prioritizes active instances, then verified, then most recent.
     """
-    # Sort: active first, then verified, then by last_verified_at (most recent first)
-    def sort_key(inst):
-        active = inst.get("active", False)
-        verified = inst.get("verified", False)
-        last_verified = inst.get("last_verified_at") or ""
-        return (not active, not verified, last_verified)
-    
+
+    def sort_key(inst: dict) -> tuple[bool, bool, str]:
+        return (
+            not inst.get("active", False),
+            not inst.get("verified", False),
+            inst.get("last_verified_at") or "",
+        )
+
     sorted_instances = sorted(instances, key=sort_key)
-    
+
     tried = 0
     for inst in sorted_instances:
         if tried >= max_tries:
@@ -215,15 +220,15 @@ def find_instance_with_logs(
         inst_id = inst["instance_id"]
         verified = inst.get("verified", False)
         active = inst.get("active", False)
-        
+
         print(f"  Trying {inst_id[:8]}... (active={active}, verified={verified})", end=" ")
         status, content = fetch_instance_logs(base_url, api_key, inst_id, backfill=200)
         tried += 1
-        
+
         if status == 200 and content.strip():
-            print(f"✓ ({len(content)} bytes)")
+            print(f"OK ({len(content)} bytes)")
             return inst_id, content
-        elif status == 200:
+        if status == 200:
             print("empty")
         elif status == 404:
             print("gone")
@@ -231,56 +236,65 @@ def find_instance_with_logs(
             print("forbidden")
         else:
             print(f"status={status}")
-    
+
     return None, f"No instance returned logs after {tried} tries"
 
 
 def check_logs(chute_name: str, warmup_module: str | None = None, stream: bool = False):
     """
-    Main function to check logs for a chute.
-    
-    Args:
-        chute_name: Chute name (will be looked up)
-        warmup_module: Optional module:var path to warm up first
-        stream: If True, stream logs instead of fetching once
+    Check logs for a chute.
+
+    Watcher-first behavior:
+      - always attempts `chutes warmup <target> --stream-logs`
+      - falls back to legacy polling when watcher mode is unavailable or fails
+
+    Compatibility flags:
+      - --warmup: only used in legacy fallback mode
+      - --stream: only affects legacy fallback mode
     """
-    import time
-    
+    watcher_target = chute_name
+
+    if chutes_supports_stream_logs():
+        status = run_watcher_logs(watcher_target)
+        if status == 0:
+            return
+        if status == 130:
+            return
+        print(f"Watcher mode exited with status {status}; falling back to legacy polling.")
+    else:
+        print("Installed chutes CLI does not support --stream-logs; using legacy polling.")
+
     try:
         api_key = get_api_key()
-    except RuntimeError as e:
-        print(f"Error: {e}")
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
         return
-    
+
     base_url = get_base_url()
-    
-    # Warmup if requested (triggers instance spin-up)
+
     if warmup_module:
-        print(f"Warming up {warmup_module} (10s)...")
+        print(f"Compatibility mode: legacy warmup using {warmup_module}...")
         if not warmup_chute(warmup_module, timeout_seconds=10):
-            return  # Exit early if warmup failed (chute not deployed)
-    
-    # Resolve chute name to ID using CLI
+            return
+
     print(f"Looking up chute '{chute_name}'...")
     chute_id = get_chute_id_by_name(chute_name)
     if not chute_id:
-        # Maybe it's already a UUID
         if chute_name.count("-") == 4:
             chute_id = chute_name
         else:
             print(f"Chute not found: {chute_name}")
             return
-    
+
     print(f"Chute ID: {chute_id}")
-    
-    # Retry loop - instances may take time to spin up
+
     max_retries = 4
     retry_delay = 8
-    
+
     for attempt in range(max_retries):
         print(f"Getting instances... (attempt {attempt + 1}/{max_retries})")
         instances = get_chute_instances(base_url, api_key, chute_id)
-        
+
         if not instances:
             if attempt < max_retries - 1:
                 print(f"No instances yet, waiting {retry_delay}s...")
@@ -288,11 +302,10 @@ def check_logs(chute_name: str, warmup_module: str | None = None, stream: bool =
                 continue
             print("No instances found (chute may be cold)")
             return
-        
+
         print(f"Found {len(instances)} instance(s)")
-        
+
         if stream:
-            # For streaming, use first verified instance
             for inst in instances:
                 if inst.get("verified"):
                     print(f"Streaming logs from {inst['instance_id']}...")
@@ -300,29 +313,42 @@ def check_logs(chute_name: str, warmup_module: str | None = None, stream: bool =
                     return
             print("No verified instances to stream from")
             return
+
+        inst_id, logs = find_instance_with_logs(base_url, api_key, instances)
+        if inst_id:
+            print(f"\n{'=' * 60}")
+            print(f"Logs from instance {inst_id}:")
+            print("=" * 60)
+            print(logs)
+            return
+        if attempt < max_retries - 1:
+            print(f"No logs yet, waiting {retry_delay}s...")
+            time.sleep(retry_delay)
         else:
-            # Try to find an instance with logs
-            inst_id, logs = find_instance_with_logs(base_url, api_key, instances)
-            if inst_id:
-                print(f"\n{'='*60}")
-                print(f"Logs from instance {inst_id}:")
-                print('='*60)
-                print(logs)
-                return
-            elif attempt < max_retries - 1:
-                print(f"No logs yet, waiting {retry_delay}s...")
-                time.sleep(retry_delay)
-            else:
-                print(f"\n{logs}")
+            print(f"\n{logs}")
 
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Fetch logs from chute instances")
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Watcher-first chute logs: uses `chutes warmup --stream-logs` when available, "
+            "falls back to legacy API-key polling for older CLIs."
+        )
+    )
     parser.add_argument("chute_id", help="Chute ID or name")
-    parser.add_argument("--warmup", "-w", help="Warmup module path (e.g., deploy_xtts_whisper:chute)")
-    parser.add_argument("--stream", "-s", action="store_true", help="Stream logs continuously")
-    
+    parser.add_argument(
+        "--warmup",
+        "-w",
+        help="Compatibility mode only: module path used for legacy warmup fallback (e.g., deploy_xtts_whisper:chute)",
+    )
+    parser.add_argument(
+        "--stream",
+        "-s",
+        action="store_true",
+        help="Compatibility mode only: stream continuously in legacy fallback",
+    )
+
     args = parser.parse_args()
     check_logs(args.chute_id, warmup_module=args.warmup, stream=args.stream)
