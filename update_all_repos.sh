@@ -101,8 +101,19 @@ for REPO in "${REPOS[@]}"; do
     CLONE_URL="https://github.com/$DEFAULT_ORG/$REPO.git"
     REPO_PATH="$SCRIPT_DIR/$REPO"
 
-    if [ ! -d "$REPO_PATH" ]; then
-        echo "[CLONE] $REPO <- $CLONE_URL"
+    # Detect whether the directory is a valid git repo
+    REPO_VALID=false
+    if [ -d "$REPO_PATH" ] && /usr/bin/git -C "$REPO_PATH" rev-parse --git-dir > /dev/null 2>&1; then
+        REPO_VALID=true
+    fi
+
+    if [ "$REPO_VALID" = false ]; then
+        if [ -d "$REPO_PATH" ]; then
+            echo "[RECLONE] $REPO - directory exists but is not a valid git repository, removing and re-cloning"
+            rm -rf "$REPO_PATH"
+        else
+            echo "[CLONE] $REPO <- $CLONE_URL"
+        fi
         if /usr/bin/git clone "$CLONE_URL" "$REPO_PATH" 2>&1; then
             echo "[CLONED] $REPO"
             ((SUCCESS_COUNT++))
@@ -110,13 +121,6 @@ for REPO in "${REPOS[@]}"; do
             echo "[FAILED] $REPO - git clone failed"
             ((FAILURE_COUNT++))
         fi
-        echo ""
-        continue
-    fi
-
-    if [ ! -d "$REPO_PATH/.git" ]; then
-        echo "[SKIP] $REPO - Directory exists but is not a git repository"
-        ((SKIPPED_COUNT++))
         echo ""
         continue
     fi
