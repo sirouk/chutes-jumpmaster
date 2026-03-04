@@ -21,6 +21,47 @@ DEFAULT_REPOS=(
     "sek8s"
 )
 
+is_repo_ignored() {
+    local repo="$1"
+    [ -f "$GITIGNORE_FILE" ] || return 1
+    grep -qxF "$repo" "$GITIGNORE_FILE" || grep -qxF "/$repo" "$GITIGNORE_FILE"
+}
+
+ensure_repos_ignored() {
+    local repos=("$@")
+    local missing=()
+    local repo
+
+    for repo in "${repos[@]}"; do
+        [ -n "$repo" ] || continue
+        if ! is_repo_ignored "$repo"; then
+            missing+=("$repo")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        [ -f "$GITIGNORE_FILE" ] || touch "$GITIGNORE_FILE"
+
+        if ! grep -qxF "# Sub-repo directories (managed by update_all_repos.sh)" "$GITIGNORE_FILE"; then
+            [ -s "$GITIGNORE_FILE" ] && echo "" >> "$GITIGNORE_FILE"
+            echo "# Sub-repo directories (managed by update_all_repos.sh)" >> "$GITIGNORE_FILE"
+        fi
+
+        for repo in "${missing[@]}"; do
+            echo "/$repo" >> "$GITIGNORE_FILE"
+            echo "Added /$repo to .gitignore"
+        done
+    fi
+
+    for repo in "${repos[@]}"; do
+        [ -n "$repo" ] || continue
+        if ! is_repo_ignored "$repo"; then
+            echo "[FAILED] Missing .gitignore entry for $repo"
+            exit 1
+        fi
+    done
+}
+
 echo "=== Chutes Sub-repositories Update Script ==="
 echo "Base directory: $SCRIPT_DIR"
 echo ""
@@ -65,23 +106,6 @@ if [ ! -f "$SUBREPOS_FILE" ]; then
     echo ""
     echo "Created $SUBREPOS_FILE"
 
-    # Add non-default repo directories to .gitignore
-    if [ ${#EXTRA_REPOS[@]} -gt 0 ]; then
-        added_any=false
-        for r in "${EXTRA_REPOS[@]}"; do
-            # Skip if already present in .gitignore
-            if ! grep -qxF "$r" "$GITIGNORE_FILE" && ! grep -qxF "/$r" "$GITIGNORE_FILE"; then
-                if [ "$added_any" = false ]; then
-                    echo "" >> "$GITIGNORE_FILE"
-                    echo "# Extra sub-repos (added by update_all_repos.sh)" >> "$GITIGNORE_FILE"
-                    added_any=true
-                fi
-                echo "/$r" >> "$GITIGNORE_FILE"
-                echo "Added /$r to .gitignore"
-            fi
-        done
-    fi
-
     echo ""
 fi
 
@@ -92,6 +116,8 @@ REPOS=()
 while IFS= read -r line; do
     REPOS+=("$line")
 done < <(grep -v '^\s*#' "$SUBREPOS_FILE" | grep -v '^\s*$')
+
+ensure_repos_ignored "${REPOS[@]}"
 
 SUCCESS_COUNT=0
 FAILURE_COUNT=0
