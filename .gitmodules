@@ -4,9 +4,6 @@
 [submodule "chutes-api"]
 	path = chutes-api
 	url = https://github.com/chutesai/chutes-api.git
-[submodule "chutes-web"]
-	path = chutes-web
-	url = https://github.com/chutesai/chutes-web.git
 [submodule "chutes-miner"]
 	path = chutes-miner
 	url = https://github.com/chutesai/chutes-miner.git

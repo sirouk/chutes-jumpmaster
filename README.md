@@ -33,7 +33,6 @@ This repository is a workspace for several core Chutes repos. These are tracked 
 |-----------|---------|-----|
 | `chutes/` | Python SDK for building images and chutes | [github.com/chutesai/chutes](https://github.com/chutesai/chutes) |
 | `chutes-api/` | API server and validation logic | [github.com/chutesai/chutes-api](https://github.com/chutesai/chutes-api) |
-| `chutes-web/` | Web frontend and dashboard | [github.com/chutesai/chutes-web](https://github.com/chutesai/chutes-web) |
 | `chutes-miner/` | GPU miner code for running chutes | [github.com/chutesai/chutes-miner](https://github.com/chutesai/chutes-miner) |
 | `chutes-e2ee-transport/` | End-to-end encrypted communication | [github.com/chutesai/chutes-e2ee-transport](https://github.com/chutesai/chutes-e2ee-transport) |
 | `sek8s/` | Kubernetes integration and infrastructure | [github.com/chutesai/sek8s](https://github.com/chutesai/sek8s) |
@@ -46,7 +45,7 @@ Run `update_all_repos.sh` to fetch and pull latest changes from all sub-reposito
 ./update_all_repos.sh
 ```
 
-This ensures your local workspace stays current with upstream developments.
+On first run, the script will display the default repo list and prompt you to add any extra repos. Your choices are saved to `.sub-repos` (untracked) and used on all subsequent runs.
 
 ---
 
@@ -58,7 +57,7 @@ Use this loop to stay current and operational:
    ```bash
    ./update_all_repos.sh
    ```
-2. Inspect what changed in submodules (`chutes/`, `chutes-api/`, `chutes-web/`, etc.) using your IDE or git diff tools.
+2. Inspect what changed in submodules (`chutes/`, `chutes-api/`, `chutes-miner/`, etc.) using your IDE or git diff tools.
 3. Use `deploy.sh` to build, deploy, check status, stream logs, and warm chutes as needed.
 
 ---
@@ -262,7 +261,6 @@ chutes-jumpmaster/
 │   └── instance_logs.py         # Watcher-first log utility (legacy fallback included)
 ├── chutes/                      # Chutes Python SDK (git submodule)
 ├── chutes-api/                  # API server (git submodule)
-├── chutes-web/                  # Web frontend (git submodule)
 ├── chutes-miner/                # Miner code (git submodule)
 ├── chutes-e2ee-transport/       # E2EE transport (git submodule)
 ├── sek8s/                       # Kubernetes integration (git submodule)
