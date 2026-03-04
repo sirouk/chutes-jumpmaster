@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# Chutes Deploy Script
+# Chutes Utils Script
 # =============================================================================
 # Interactive deployment tool with optional flags for automation
 # GUIDES: https://chutes.ai/docs/getting-started/first-chute
@@ -98,7 +98,7 @@ ensure_venv() {
 ensure_chutes_config() {
     if [[ ! -f "$CHUTES_CONFIG" ]]; then
         print_error "Chutes config not found at $CHUTES_CONFIG"
-        print_info "Run setup.sh to register, or use Account → Link Bittensor Wallet in deploy.sh."
+        print_info "Run setup.sh to register, or use Account → Link Bittensor Wallet in utils.sh."
         return 1
     fi
 }
@@ -193,10 +193,10 @@ PYCODE
 
 show_usage() {
     cat << EOF
-${CYAN}Chutes Deploy Script${NC}
+${CYAN}Chutes Utils Script${NC}
 
 ${YELLOW}Usage:${NC}
-  ./deploy.sh [OPTIONS]
+  ./utils.sh [OPTIONS]
 
 ${YELLOW}Options:${NC}
   -h, --help              Show this help message
@@ -231,13 +231,13 @@ ${YELLOW}Available Modules:${NC}
 $(list_modules_quiet)
 
 ${YELLOW}Examples:${NC}
-  ./deploy.sh                                    # Interactive mode
-  ./deploy.sh --list-chutes                      # List deployed chutes
-  ./deploy.sh --build deploy_xtts_whisper --local
-  ./deploy.sh --run-docker deploy_xtts_whisper    # Run in Docker with GPU
-  ./deploy.sh --run deploy_xtts_whisper           # Run on host (dev mode)
-  ./deploy.sh --deploy deploy_xtts_whisper --accept-fee
-  ./deploy.sh --status xtts-whisper
+  ./utils.sh                                    # Interactive mode
+  ./utils.sh --list-chutes                      # List deployed chutes
+  ./utils.sh --build deploy_xtts_whisper --local
+  ./utils.sh --run-docker deploy_xtts_whisper    # Run in Docker with GPU
+  ./utils.sh --run deploy_xtts_whisper           # Run on host (dev mode)
+  ./utils.sh --deploy deploy_xtts_whisper --accept-fee
+  ./utils.sh --status xtts-whisper
 
 EOF
 }
@@ -540,7 +540,7 @@ do_build() {
     fi
     
     # Build the command string for display
-    local cmd="${env_prefix}CHUTES_USERNAME=\"$username\" chutes build \"${module}:chute\""
+    local cmd="${env_prefix}chutes build \"${module}:chute\""
     [[ -n "$local_flag" ]] && cmd="$cmd $local_flag"
     [[ -n "$debug_flag" ]] && cmd="$cmd $debug_flag"
     cmd="$cmd --wait"
@@ -559,9 +559,9 @@ do_build() {
     # shellcheck disable=SC2086
     set +e
     if [[ -f "$manifest_file" ]]; then
-        CHUTES_BUILD_AUTO_YES=1 CHUTES_ROUTE_MANIFEST="$manifest_file" CHUTES_USERNAME="$username" chutes build "${module}:chute" $local_flag $debug_flag --wait
+        CHUTES_ROUTE_MANIFEST="$manifest_file" chutes build "${module}:chute" $local_flag $debug_flag --wait
     else
-        CHUTES_BUILD_AUTO_YES=1 CHUTES_USERNAME="$username" chutes build "${module}:chute" $local_flag $debug_flag --wait
+        chutes build "${module}:chute" $local_flag $debug_flag --wait
     fi
     build_status=$?
     set -e
@@ -786,31 +786,6 @@ test_inspecto_hash() {
     fi
 }
 
-wait_for_chute_ready() {
-    local port="$1"
-    local max_wait="${2:-300}"  # 5 minutes default
-    local check_interval="${3:-15}"
-    local elapsed=0
-    
-    print_info "Waiting for chute to become ready on port $port..."
-    
-    while [[ $elapsed -lt $max_wait ]]; do
-        # Try to hit the health endpoint or root
-        if curl -s --max-time 2 "http://127.0.0.1:${port}/docs" > /dev/null 2>&1; then
-            echo ""
-            print_success "Chute is ready on port $port"
-            return 0
-        fi
-        
-        sleep "$check_interval"
-        elapsed=$((elapsed + check_interval))
-        print_info "Still waiting... (${elapsed}s elapsed)"
-    done
-    
-    print_error "Timeout waiting for chute to become ready"
-    return 1
-}
-
 verify_chute_cords() {
     local port="$1"
     local module="$2"
@@ -871,58 +846,6 @@ get_api_base_url() {
         base_url="https://api.chutes.ai"
     fi
     echo "$base_url"
-}
-
-select_instance_id_from_output() {
-    python3 - 2>/dev/null <<'PYCODE'
-import json, re, sys
-output = sys.stdin.read()
-match = re.search(r'\{[\s\S]*\}', output)
-if not match:
-    sys.exit(1)
-try:
-    data = json.loads(match.group())
-except Exception:
-    sys.exit(1)
-instances = data.get("instances") or []
-if not instances:
-    sys.exit(1)
-
-def sort_key(inst):
-    return (not inst.get("active", False), not inst.get("verified", False), inst.get("last_verified_at") or "")
-
-instances = sorted(instances, key=sort_key)
-
-if len(instances) == 1:
-    print(instances[0]["instance_id"])
-    sys.exit(0)
-
-print("\nInstances:", file=sys.stderr)
-for i, inst in enumerate(instances, 1):
-    print(f"  {i}) {inst.get('instance_id')}  active={inst.get('active')} verified={inst.get('verified')}", file=sys.stderr)
-
-if not sys.stdin.isatty():
-    idx = 0
-else:
-    try:
-        prompt = f"Select instance (1-{len(instances)}) [1]: "
-        sys.stderr.write(prompt)
-        sys.stderr.flush()
-        choice = sys.stdin.readline().strip()
-    except EOFError:
-        choice = ""
-    if not choice:
-        idx = 0
-    else:
-        try:
-            idx = int(choice) - 1
-        except ValueError:
-            sys.exit(1)
-        if idx < 0 or idx >= len(instances):
-            idx = 0
-
-print(instances[idx]["instance_id"])
-PYCODE
 }
 
 do_run_docker() {
@@ -2016,7 +1939,7 @@ do_create_from_image() {
 show_menu() {
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}  Chutes Deploy Hub${NC}"
+    echo -e "${CYAN}  Chutes Utils Hub${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "  ${CYAN}── ACCOUNT ───────────────────────────────────────────────────────${NC}"
