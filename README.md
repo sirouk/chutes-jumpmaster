@@ -5,7 +5,7 @@ Jumpmaster is a control-plane workspace for operating in the Chutes ecosystem.
 Primary jobs:
 
 - **Track upstream changes across core Chutes repos** - Keep sub-repos current and inspect diffs quickly
-- **Build, run, and deploy chutes** - Use the `tools/` scripts and `chutes` CLI for lifecycle commands
+- **Build, run, and deploy chutes with `utils.sh`** - Interactive hub for the full lifecycle: build, discover, deploy, logs, warmup
 - **Wrap upstream Docker images into chutes** - Auto-discover routes and register passthrough cords
 
 Everything here is vendor-neutral—you can reuse the exact workflow for any service that needs to run on Chutes.
@@ -18,8 +18,8 @@ Everything here is vendor-neutral—you can reuse the exact workflow for any ser
 # 1. Setup environment (creates .venv, installs deps, registers with Chutes)
 ./setup.sh
 
-# 2. Activate venv and use the chutes CLI / tools directly
-source .venv/bin/activate
+# 2. Use the interactive hub for everything else
+./utils.sh
 ```
 
 ---
@@ -57,7 +57,7 @@ Use this loop to stay current and operational:
    ./update_all_repos.sh
    ```
 2. Inspect what changed in the sub-repos (`chutes/`, `chutes-api/`, `chutes-miner/`, etc.) using your IDE or git diff tools.
-3. Use the `chutes` CLI and `tools/` scripts to build, deploy, check status, stream logs, and warm chutes as needed.
+3. Use `./utils.sh` to build, deploy, check status, stream logs, and warm chutes as needed.
 
 ---
 
@@ -69,7 +69,7 @@ Use this loop to stay current and operational:
 
 | Tool | Purpose |
 |------|---------|
-| **Auto-Discovery (`tools/discover_routes.py`)** | Boots the upstream image locally, probes common OpenAPI endpoints, and writes `deploy_*.routes.json` so passthrough cords can be generated automatically. |
+| **Auto-Discovery (`utils.sh --discover` / `tools/discover_routes.py`)** | Boots the upstream image locally, probes common OpenAPI endpoints, and writes `deploy_*.routes.json` so passthrough cords can be generated automatically. |
 | **Wrapper SDK (`tools/chute_wrappers.py`)** | Injects system Python, the `chutes` user, OpenCL libs, and helper scripts into any base image. Handles route registration, startup waits, and health checks. |
 | **Image Generator (`tools/create_chute_from_image.py`)** | Replays an existing Docker image's metadata on top of the Chutes base (`deploy_*_auto.py`), giving you a reproducible python-first version that still launches the original entrypoint. |
 | **Vanilla examples (`vanilla_examples/`)** | Pure-Python chutes that instantiate `Chute`/`ChuteImage` directly—useful when you want the traditional `torch.cuda` debugging loop without the wrapper layer. |
@@ -92,6 +92,10 @@ When changes come down the pipeline from upstream chutes repos, use these tools 
 The discovery tool spins up a container, probes for OpenAPI specs, and generates route definitions:
 
 ```bash
+# Via the interactive hub (prompts for delays/gpus)
+./utils.sh --discover deploy_my_service
+
+# Or directly
 python tools/discover_routes.py --chute-file deploy_my_service.py \
     --startup-delay 300 --probe-timeout 60 --docker-gpus all
 ```
@@ -137,31 +141,45 @@ Interactive wizard that:
 - Installs the `chutes` CLI and supporting deps
 - Helps you register a new Chutes account *or* link an existing website account to a Bittensor wallet in `~/.chutes/config.ini`
 
-### 2. Build & Deploy
+### 2. Build & Deploy (`./utils.sh`)
 
-Use the `chutes` CLI directly after activating the venv:
+Interactive hub with 13 menu options, or use flags directly:
 
+| Category | Option | Capability |
+|----------|--------|------------|
+| Account | **1** | Show username + payment address from config |
+| Account | **2** | Link existing Chutes account to local Bittensor wallet and write `~/.chutes/config.ini` |
+| Build/Discovery | **3** | Build from local `deploy_*.py` (wraps `CHUTE_BASE_IMAGE`) |
+| Build/Discovery | **4** | Create a chute definition from an existing Docker image |
+| Local Run | **5** | Run wrapped service in Docker (GPU sanity check) |
+| Local Run | **6** | Run chute in host dev mode |
+| Cloud Ops | **7** | Deploy chute (upload + schedule on Chutes.ai) |
+| Cloud Ops | **8** | Chute status (health + instances) |
+| Cloud Ops | **9** | Warmup + stream logs via SDK watcher (`chutes warmup <chute> --stream-logs`) |
+| Cloud Ops | **10** | Warmup once (manual spin-up) |
+| Cloud Ops | **11** | Keep warm loop (repeated warmup) |
+| Cleanup | **12** | List & delete chutes (interactive safety checks) |
+| Cleanup | **13** | List & delete images |
+
+**CLI flag examples**
 ```bash
-# Discover routes from a running container
-python tools/discover_routes.py --chute-file deploy_myservice.py \
-    --startup-delay 300 --probe-timeout 60 --docker-gpus all
-
-# Build and deploy
-chutes push deploy_myservice.py
-
-# Check status, warmup, stream logs
-chutes chutes list
-chutes warmup <chute-name> --stream-logs
+./utils.sh --discover deploy_xtts_whisper
+./utils.sh --build deploy_xtts_whisper --local
+./utils.sh --deploy deploy_xtts_whisper --accept-fee
+./utils.sh --logs xtts-whisper
 ```
 
 ### 3. Route Discovery
 
+```bash
+./utils.sh --discover deploy_myservice
+```
 1. Starts the base image in Docker with GPU access
 2. Waits for startup
 3. Probes `/openapi.json`, `/docs.json`, `/docs/openapi.json`, `/swagger.json`
 4. Writes `deploy_myservice.routes.json`
 
-If no manifest exists at build time, re-run discovery before pushing to avoid deploying an image with no cords.
+If no manifest exists when you choose "Build chute," the script defaults the discovery prompt to **Yes** to avoid deploying an image with no cords.
 
 ---
 
@@ -225,6 +243,7 @@ Most guidance here focuses on wrapping upstream Docker images, but some services
 ```
 chutes-jumpmaster/
 ├── setup.sh                     # Environment setup (venv, deps, registration)
+├── utils.sh                     # Main interactive hub (build, deploy, logs, warmup)
 ├── update_all_repos.sh          # Clone/update all chutes sub-repositories
 ├── requirements.txt             # Python deps
 ├── deploy_example_docker.py     # Wrapper template for arbitrary images
