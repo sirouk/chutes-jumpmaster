@@ -107,6 +107,10 @@ get_username() {
     grep -E "^username\s*=" "$CHUTES_CONFIG" 2>/dev/null | cut -d'=' -f2 | tr -d ' '
 }
 
+get_user_id() {
+    grep -E "^user_id\s*=" "$CHUTES_CONFIG" 2>/dev/null | cut -d'=' -f2 | tr -d ' '
+}
+
 chutes_api_list_tsv() {
     # Query Chutes API directly (signed with hotkey) to avoid rich-table truncation.
     # Output: tab-delimited rows for the given object type.
@@ -836,6 +840,14 @@ get_api_key() {
     print_error "CHUTES_API_KEY not set and ~/.chutes/api_key missing"
     print_info "Create one with: chutes keys create <name>"
     print_info "Or export CHUTES_API_KEY=cpk_..."
+    return 1
+}
+
+get_fingerprint() {
+    if [[ -n "${CHUTES_FINGERPRINT:-}" ]]; then
+        echo "$CHUTES_FINGERPRINT"
+        return 0
+    fi
     return 1
 }
 
@@ -1569,28 +1581,35 @@ do_keep_warm() {
 do_link_bittensor_wallet() {
     print_header "Link Bittensor Wallet (existing Chutes account)"
 
-    local api_key=""
-    if api_key=$(get_api_key); then
+    local fingerprint=""
+    if fingerprint=$(get_fingerprint); then
         : # ok
     else
-        read -rp "Chutes API key (cpk_...): " api_key
-        api_key=$(echo "$api_key" | tr -d '[:space:]')
-        if [[ -z "$api_key" ]]; then
-            print_error "API key is required (set CHUTES_API_KEY or write ~/.chutes/api_key)"
+        read -rsp "Chutes fingerprint: " fingerprint
+        echo ""
+        fingerprint=$(printf '%s' "$fingerprint" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [[ -z "$fingerprint" ]]; then
+            print_error "Fingerprint is required (set CHUTES_FINGERPRINT or paste it here)"
             return 1
         fi
-        if confirm "Save API key to ~/.chutes/api_key for later (logs, etc.)?" "y"; then
-            mkdir -p "$HOME/.chutes"
-            printf "%s\n" "$api_key" > "$HOME/.chutes/api_key"
-            chmod 600 "$HOME/.chutes/api_key" 2>/dev/null || true
-            print_success "Saved ~/.chutes/api_key"
-        fi
+    fi
+    fingerprint=$(printf '%s' "$fingerprint" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fingerprint="${fingerprint#Bearer }"
+    fingerprint="${fingerprint#bearer }"
+    fingerprint=$(printf '%s' "$fingerprint" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -z "$fingerprint" ]]; then
+        print_error "Fingerprint is required"
+        return 1
+    fi
+    if [[ "$fingerprint" == cpk_* || "$fingerprint" == cak_* ]]; then
+        print_error "API keys do not work for /users/change_bt_auth; provide your fingerprint instead."
+        return 1
     fi
     local base_url
     base_url=$(get_api_base_url)
 
     print_info "This will update /users/change_bt_auth and write: $CHUTES_CONFIG"
-    print_info "Auth: uses CHUTES_API_KEY or ~/.chutes/api_key"
+    print_info "Auth: uses your fingerprint (CHUTES_FINGERPRINT)"
     echo ""
 
     if ! confirm "Continue?" "y"; then
@@ -1703,18 +1722,22 @@ PY
         return 1
     fi
 
-    local auth_header_primary="$api_key"
-    local auth_header_secondary="Bearer ${api_key}"
-    if [[ "$api_key" =~ ^[Bb]earer[[:space:]]+ ]]; then
-        auth_header_primary="$api_key"
-        auth_header_secondary="$api_key"
-    fi
     local username=""
     local user_id=""
     local payment_address=""
     local developer_payment_address=""
+    local derived_user_id=""
+    derived_user_id=$(python3 - "$fingerprint" <<'PY'
+import hashlib, sys, uuid
+
+fingerprint = sys.argv[1]
+fingerprint_hash = hashlib.blake2b(fingerprint.encode()).hexdigest()
+print(uuid.uuid5(uuid.NAMESPACE_OID, fingerprint_hash))
+PY
+) || true
 
     echo ""
+    [[ -n "$derived_user_id" ]] && print_info "Derived user_id: ${derived_user_id}"
     print_info "Coldkey: ${coldkey_ss58}"
     print_info "Hotkey:  ${hotkey_ss58address}"
     echo ""
@@ -1731,20 +1754,9 @@ PY
     resp_tmp=$(mktemp)
     local code
     code=$(curl -sS --connect-timeout 10 --max-time 30 -o "$resp_tmp" -w "%{http_code}" -X POST "${base_url}/users/change_bt_auth" \
-        -H "Authorization: ${auth_header_primary}" \
+        -H "Authorization: ${fingerprint}" \
         -H "Content-Type: application/json" \
         -d "$payload" || true)
-    if [[ ! "$code" =~ ^2 ]]; then
-        code=$(curl -sS --connect-timeout 10 --max-time 30 -o "$resp_tmp" -w "%{http_code}" -X POST "${base_url}/users/change_bt_auth" \
-            -H "Authorization: ${auth_header_secondary}" \
-            -H "Content-Type: application/json" \
-            -d "$payload" || true)
-        if [[ "$code" =~ ^2 ]]; then
-            local tmp="$auth_header_primary"
-            auth_header_primary="$auth_header_secondary"
-            auth_header_secondary="$tmp"
-        fi
-    fi
     if [[ ! "$code" =~ ^2 ]]; then
         print_error "Failed to update /users/change_bt_auth (HTTP $code)"
         head -c 300 "$resp_tmp" 2>/dev/null || true
@@ -1788,6 +1800,9 @@ PY
 ) || true
     IFS=$'\t' read -r username user_id payment_address developer_payment_address <<<"$fields"
 
+    if [[ -z "$user_id" && -n "$derived_user_id" ]]; then
+        user_id="$derived_user_id"
+    fi
     [[ -n "$username" && -n "$user_id" ]] && print_info "Account: ${username} (${user_id})"
 
     if [[ -z "$username" || -z "$user_id" ]]; then
@@ -1840,10 +1855,12 @@ show_account_info() {
     fi
     
     local username=$(get_username)
+    local user_id=$(get_user_id)
     local payment=$(grep -E "^address\s*=" "$CHUTES_CONFIG" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
     
-    echo -e "${BLUE}Username:${NC}        $username"
-    echo -e "${BLUE}Payment Address:${NC} $payment"
+    echo -e "${BLUE}Username:${NC}        ${username:-<not set>}"
+    echo -e "${BLUE}User ID:${NC}         ${user_id:-<not set>}"
+    echo -e "${BLUE}Payment Address:${NC} ${payment:-<not set>}"
     echo ""
     print_info "Add TAO to payment address for deployments"
     print_info "Account needs >= \$50 USD balance for remote builds"

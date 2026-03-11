@@ -88,6 +88,14 @@ prompt_input() {
     fi
 }
 
+prompt_secret() {
+    local prompt="$1"
+    local result
+    read -rsp "$prompt: " result
+    echo ""
+    echo "$result"
+}
+
 show_usage() {
     cat << EOF
 ${CYAN}Chutes Setup Script${NC}
@@ -425,6 +433,14 @@ get_api_key() {
     return 1
 }
 
+get_fingerprint() {
+    if [[ -n "${CHUTES_FINGERPRINT:-}" ]]; then
+        echo "$CHUTES_FINGERPRINT"
+        return 0
+    fi
+    return 1
+}
+
 get_api_base_url() {
     if [[ -n "${CHUTES_API_BASE_URL:-}" ]]; then
         echo "$CHUTES_API_BASE_URL"
@@ -437,28 +453,36 @@ link_existing_chutes_account() {
     print_header "Link Existing Chutes Account (website → CLI)"
 
     print_info "This updates /users/change_bt_auth and writes: $CHUTES_CONFIG"
-    print_info "Requires a Chutes API key (CHUTES_API_KEY or ~/.chutes/api_key)"
+    print_info "Requires your Chutes account fingerprint (CHUTES_FINGERPRINT)"
     echo ""
 
-    local api_key=""
-    if api_key=$(get_api_key); then
+    local fingerprint=""
+    if fingerprint=$(get_fingerprint); then
         : # ok
     else
         if $NON_INTERACTIVE; then
-            print_error "CHUTES_API_KEY not set and ~/.chutes/api_key missing (required for linking)"
+            print_error "CHUTES_FINGERPRINT not set (required for linking)"
             return 1
         fi
-        api_key=$(prompt_input "Chutes API key (cpk_...)" "")
-        if [[ -z "$api_key" ]]; then
-            print_error "API key is required"
+        fingerprint=$(prompt_secret "Chutes fingerprint")
+        fingerprint=$(printf '%s' "$fingerprint" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [[ -z "$fingerprint" ]]; then
+            print_error "Fingerprint is required"
             return 1
         fi
-        if confirm "Save API key to ~/.chutes/api_key for later?" "y"; then
-            mkdir -p "$HOME/.chutes"
-            printf "%s\n" "$api_key" > "$HOME/.chutes/api_key"
-            chmod 600 "$HOME/.chutes/api_key" 2>/dev/null || true
-            print_success "Saved ~/.chutes/api_key"
-        fi
+    fi
+
+    fingerprint=$(printf '%s' "$fingerprint" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fingerprint="${fingerprint#Bearer }"
+    fingerprint="${fingerprint#bearer }"
+    fingerprint=$(printf '%s' "$fingerprint" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -z "$fingerprint" ]]; then
+        print_error "Fingerprint is required"
+        return 1
+    fi
+    if [[ "$fingerprint" == cpk_* || "$fingerprint" == cak_* ]]; then
+        print_error "API keys do not work for /users/change_bt_auth; provide your fingerprint instead."
+        return 1
     fi
 
     local base_url
@@ -554,19 +578,22 @@ PY
         return 1
     fi
 
-    local auth_header_primary="$api_key"
-    local auth_header_secondary="Bearer ${api_key}"
-    if [[ "$api_key" =~ ^[Bb]earer[[:space:]]+ ]]; then
-        auth_header_primary="$api_key"
-        auth_header_secondary="$api_key"
-    fi
-
     local username=""
     local user_id=""
     local payment_address=""
     local developer_payment_address=""
+    local derived_user_id=""
+    derived_user_id=$(python3 - "$fingerprint" <<'PY'
+import hashlib, sys, uuid
+
+fingerprint = sys.argv[1]
+fingerprint_hash = hashlib.blake2b(fingerprint.encode()).hexdigest()
+print(uuid.uuid5(uuid.NAMESPACE_OID, fingerprint_hash))
+PY
+) || true
 
     echo ""
+    [[ -n "$derived_user_id" ]] && print_info "Derived user_id: ${derived_user_id}"
     print_info "Coldkey: ${coldkey_ss58}"
     print_info "Hotkey:  ${hotkey_ss58address}"
     echo ""
@@ -583,20 +610,9 @@ PY
     resp_tmp=$(mktemp)
     local code
     code=$(curl -sS --connect-timeout 10 --max-time 30 -o "$resp_tmp" -w "%{http_code}" -X POST "${base_url}/users/change_bt_auth" \
-        -H "Authorization: ${auth_header_primary}" \
+        -H "Authorization: ${fingerprint}" \
         -H "Content-Type: application/json" \
         -d "$payload" || true)
-    if [[ ! "$code" =~ ^2 ]] && [[ "$auth_header_secondary" != "$auth_header_primary" ]]; then
-        code=$(curl -sS --connect-timeout 10 --max-time 30 -o "$resp_tmp" -w "%{http_code}" -X POST "${base_url}/users/change_bt_auth" \
-            -H "Authorization: ${auth_header_secondary}" \
-            -H "Content-Type: application/json" \
-            -d "$payload" || true)
-        if [[ "$code" =~ ^2 ]]; then
-            local tmp="$auth_header_primary"
-            auth_header_primary="$auth_header_secondary"
-            auth_header_secondary="$tmp"
-        fi
-    fi
     if [[ ! "$code" =~ ^2 ]]; then
         print_error "Failed to update /users/change_bt_auth (HTTP $code)"
         head -c 300 "$resp_tmp" 2>/dev/null || true
@@ -642,6 +658,9 @@ PY
 
     rm -f "$resp_tmp"
 
+    if [[ -z "$user_id" && -n "$derived_user_id" ]]; then
+        user_id="$derived_user_id"
+    fi
     [[ -n "$username" && -n "$user_id" ]] && print_info "Account: ${username} (${user_id})"
 
     if [[ -z "$username" || -z "$user_id" ]]; then
