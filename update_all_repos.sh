@@ -156,16 +156,22 @@ for REPO in "${REPOS[@]}"; do
 
     CURRENT_BRANCH=$(/usr/bin/git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     DEFAULT_BRANCH=$(/usr/bin/git -C "$REPO_PATH" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "")
+    UPSTREAM_BRANCH=$(/usr/bin/git -C "$REPO_PATH" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo "")
 
     # Warn if not on the default branch (interactive runs only)
     if [ -t 1 ] && [ -n "$DEFAULT_BRANCH" ] && [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]; then
         echo "[WARN]  $REPO is on '$CURRENT_BRANCH', not '$DEFAULT_BRANCH' — pull may not reflect latest upstream"
     fi
 
-    PULL_OUTPUT=$(/usr/bin/git -C "$REPO_PATH" pull 2>&1)
-    PULL_STATUS=$?
-    echo "$PULL_OUTPUT"
-    if [ $PULL_STATUS -eq 0 ]; then
+    if [ -z "$UPSTREAM_BRANCH" ]; then
+        echo "[SKIPPED] $REPO - branch '$CURRENT_BRANCH' has no upstream tracking branch"
+        ((SKIPPED_COUNT++))
+        echo ""
+        continue
+    fi
+
+    if PULL_OUTPUT=$(/usr/bin/git -C "$REPO_PATH" pull 2>&1); then
+        echo "$PULL_OUTPUT"
         if echo "$PULL_OUTPUT" | grep -q "Already up to date"; then
             echo "[OK] $REPO (branch: $CURRENT_BRANCH)"
         else
@@ -173,7 +179,9 @@ for REPO in "${REPOS[@]}"; do
         fi
         ((SUCCESS_COUNT++))
     else
-        echo "[FAILED] $REPO - git pull failed"
+        PULL_STATUS=$?
+        echo "$PULL_OUTPUT"
+        echo "[FAILED] $REPO - git pull failed (exit: $PULL_STATUS)"
         ((FAILURE_COUNT++))
     fi
 
