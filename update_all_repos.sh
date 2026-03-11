@@ -3,6 +3,7 @@
 # Script to update all chutes sub-repositories
 # Clones repos that are missing, pulls repos that exist.
 # Repo list is persisted in .sub-repos (untracked) after first run.
+# New default repos are backfilled into existing .sub-repos files.
 
 set -e
 
@@ -20,6 +21,7 @@ DEFAULT_REPOS=(
     "chutes-e2ee-transport"
     "e2ee-proxy"
     "sek8s"
+    "claude-proxy"
 )
 
 is_repo_ignored() {
@@ -61,6 +63,27 @@ ensure_repos_ignored() {
             exit 1
         fi
     done
+}
+
+ensure_default_repos_present() {
+    local missing=()
+    local repo
+
+    [ -f "$SUBREPOS_FILE" ] || return 0
+
+    for repo in "${DEFAULT_REPOS[@]}"; do
+        if ! grep -v '^\s*#' "$SUBREPOS_FILE" | grep -qxF "$repo"; then
+            missing+=("$repo")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        for repo in "${missing[@]}"; do
+            echo "$repo" >> "$SUBREPOS_FILE"
+            echo "Added default repo to .sub-repos: $repo"
+        done
+        echo ""
+    fi
 }
 
 echo "=== Chutes Sub-repositories Update Script ==="
@@ -109,6 +132,8 @@ if [ ! -f "$SUBREPOS_FILE" ]; then
 
     echo ""
 fi
+
+ensure_default_repos_present
 
 # ---------------------------------------------------------------------------
 # Load repo list from .sub-repos (bash 3.2-compatible, no mapfile)

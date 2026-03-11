@@ -47,3 +47,4 @@ config.ini
 /e2ee-proxy
 /sek8s
 /chutes-web
+/claude-proxy
